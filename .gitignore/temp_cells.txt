@@ -1,0 +1,234 @@
+--- CELL 0 ---
+# This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load
+
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+# Input data files are available in the read-only "../input/" directory
+# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
+
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+    for filename in filenames:
+        print(os.path.join(dirname, filename))
+
+# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using "Save & Run All" 
+# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session
+
+--- CELL 1 ---
+train=pd.read_csv(r"C:\Users\Aaditya Saini\Desktop\Churn\data\train.csv")
+test=pd.read_csv(r"C:\Users\Aaditya Saini\Desktop\Churn\data\test.csv")
+sub=pd.read_csv(r"C:\Users\Aaditya Saini\Desktop\Churn\data\sample_submission.csv")
+
+--- CELL 2 ---
+train.head()
+
+--- CELL 3 ---
+train.info()
+
+--- CELL 4 ---
+num_cols=train.select_dtypes(include=np.number).columns.tolist()
+cat_cols=train.select_dtypes(include="object").columns.tolist()
+
+--- CELL 5 ---
+for i in cat_cols:
+    print(train[i].value_counts())
+
+--- CELL 6 ---
+import matplotlib.pyplot as plt 
+import seaborn as sns
+
+for i in num_cols:
+    plt.figure()
+    sns.boxplot(x=train[i])
+    plt.title(f"Outlier of {i}")
+    plt.show()
+
+--- CELL 7 ---
+train.drop("id",axis=1,inplace=True)
+test.drop("id",axis=1,inplace=True)
+
+--- CELL 8 ---
+num_cols.remove("id")
+
+--- CELL 9 ---
+num_cols.remove("SeniorCitizen") 
+'''removed because this is the feature we're trying to predict
+error because theres churn is not a numerical column'''
+
+--- CELL 10 ---
+cat_cols.remove("Churn")
+
+--- CELL 11 ---
+sns.pairplot(train[num_cols + ['Churn']], hue='Churn', corner=True)
+plt.show()
+
+--- CELL 12 ---
+for i in cat_cols:
+    plt.figure(figsize=(12, 6))
+    sns.countplot(data=train, x=i, hue='Churn')
+    plt.title(f"{i} Distribution")
+    plt.xticks(rotation=45)
+    plt.show()
+
+--- CELL 13 ---
+X = train.drop('Churn', axis=1)
+y = train['Churn'].map({'Yes': 1, 'No': 0})
+
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+--- CELL 14 ---
+pip install catboost
+
+--- CELL 15 ---
+# import xgboost
+# print(xgboost.__version__)
+# print(xgboost.build_info())
+
+pip install xgboost --upgrade
+
+--- CELL 16 ---
+from sklearn.model_selection import StratifiedKFold
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import roc_auc_score
+
+from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
+from sklearn.ensemble import GradientBoostingClassifier
+
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), num_cols),
+        ('cat', OneHotEncoder(drop='first', handle_unknown='ignore'), cat_cols)])
+
+n_splits = 5
+skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+
+'''OOF stands for "Out-Of-Fold" predictions. 
+These are empty arrays being created to store predictions from each model during cross-validation.'''
+oof_xgb = np.zeros(len(X_train))
+oof_cat = np.zeros(len(X_train))
+oof_gbc = np.zeros(len(X_train))
+
+test_xgb = np.zeros(len(test))
+test_cat = np.zeros(len(test))
+test_gbc = np.zeros(len(test))
+
+for fold, (tr_idx, val_idx) in enumerate(skf.split(X_train, y_train)):
+    print(f"--- Fold {fold+1} ---")
+
+    X_tr, X_val = X_train.iloc[tr_idx], X_train.iloc[val_idx]
+    y_tr, y_val = y_train.iloc[tr_idx], y_train.iloc[val_idx]
+
+    
+    xgb_pipe = Pipeline([
+        ('prep', preprocessor),
+        ('model', XGBClassifier(
+            n_estimators=4000,
+            max_depth=8,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            learning_rate=0.01,
+            eval_metric='auc',
+            tree_method='hist',
+            predictor='gpu_predictor',
+            random_state=42,
+            verbosity=0,
+            device='cuda'
+        ))
+    ])    
+
+    cat_pipe = Pipeline([
+        ('prep', preprocessor),
+        ('model', CatBoostClassifier(
+            iterations=4000,
+            depth=8,
+            bootstrap_type='Bernoulli',
+            subsample=0.8,
+            learning_rate=0.01,
+            loss_function='Logloss',
+            random_state=42,
+            verbose=0,
+            task_type ='GPU',    
+            devices= '0',
+            eval_metric='AUC'
+        ))
+    ])
+
+    gbc_pipe = Pipeline([
+        ('prep', preprocessor),
+        ('model', GradientBoostingClassifier(
+            n_estimators=2000,
+            max_depth=7,
+            subsample=0.8,
+            learning_rate=0.02,
+            random_state=42
+        ))
+    ])
+
+    gbc_pipe.fit(X_tr, y_tr)
+    xgb_pipe.fit(X_tr, y_tr)
+    cat_pipe.fit(X_tr, y_tr)
+    
+
+    oof_xgb[val_idx] = xgb_pipe.predict_proba(X_val)[:, 1]
+    oof_cat[val_idx] = cat_pipe.predict_proba(X_val)[:, 1]
+    oof_gbc[val_idx] = gbc_pipe.predict_proba(X_val)[:, 1]
+
+    test_xgb += xgb_pipe.predict_proba(test)[:, 1] / n_splits
+    test_cat += cat_pipe.predict_proba(test)[:, 1] / n_splits
+    test_gbc += gbc_pipe.predict_proba(test)[:, 1] / n_splits
+
+--- CELL 17 ---
+best_auc = 0
+best_weights = None
+
+
+for w_xgb in np.arange(0, 1.01, 0.05):
+    for w_cat in np.arange(0, 1.01 - w_xgb, 0.05):
+        w_gbc = 1.0 - w_xgb - w_cat
+        
+        blend_oof = (w_xgb * oof_xgb) + (w_cat * oof_cat) + (w_gbc * oof_gbc)
+        
+        auc = roc_auc_score(y_train, blend_oof)
+        
+        if auc > best_auc:
+            best_auc = auc
+            best_weights = (w_xgb, w_cat, w_gbc)
+
+--- CELL 18 ---
+from sklearn.isotonic import IsotonicRegression
+
+w_xgb, w_cat, w_gbc = best_weights
+
+ensemble_oof = (
+    w_xgb * oof_xgb +
+    w_cat * oof_cat +
+    w_gbc * oof_gbc
+)
+
+iso = IsotonicRegression(out_of_bounds='clip')
+iso.fit(ensemble_oof, y_train)
+
+--- CELL 19 ---
+ensemble_test = (
+    w_xgb * test_xgb +
+    w_cat * test_cat +
+    w_gbc * test_gbc
+)
+
+probs = iso.transform(ensemble_test)
+
+--- CELL 20 ---
+sub["Churn"]=probs
+
+--- CELL 21 ---
+sub.to_csv("submission.csv",index=False)
+
